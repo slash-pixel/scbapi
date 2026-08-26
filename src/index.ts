@@ -4,17 +4,20 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { jwt, sign } from "hono/jwt";
 import { PrismaClient } from "@prisma/client";
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs"; // 👈 Ajout de unlinkSync
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs";
 import { join } from "path";
 import bcrypt from "bcryptjs";
 
 const app = new Hono();
 
-app.use("/*", cors({
-  origin: "*", 
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(
+  "/*",
+  cors({
+    origin: "*",
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
 app.get("/", (c) => {
   return c.text("Bienvenue sur l'API de gestion d'images de Saint Charles ! 🚀");
@@ -24,16 +27,20 @@ const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_me";
 const UPLOAD_DIR = "./uploads";
 
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
+const ADMIN_PASSWORD_HASH =
+  process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
 
 if (!existsSync(UPLOAD_DIR)) {
   mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-app.use("/uploads/*", serveStatic({
-  root: "./",
-  rewriteRequestPath: (path) => path
-}));
+app.use(
+  "/uploads/*",
+  serveStatic({
+    root: "./",
+    rewriteRequestPath: (path) => path,
+  })
+);
 
 // ------------------------------------------------------------------
 // 1. CONNEXION (SÉCURISÉE AVEC BCRYPT)
@@ -113,32 +120,27 @@ app.post("/api/images", authMiddleware, async (c) => {
 });
 
 // ------------------------------------------------------------------
-// 👇 3. SUPPRESSION D'IMAGE (NOUVELLE ROUTE)
-// ------------------------------------------------------------------// ------------------------------------------------------------------
-// 3. SUPPRESSION D'IMAGE (NOUVELLE ROUTE)
+// 3. SUPPRESSION D'IMAGE
 // ------------------------------------------------------------------
 app.delete("/api/images/:id", authMiddleware, async (c) => {
-  const id = c.req.param("id"); // 'id' est un string
+  const id = c.req.param("id");
 
   try {
-    // Étape 1 : Vérifier si l'image existe dans la base de données
     const image = await prisma.image.findUnique({
-      where: { id: id }, // 👈 CORRECTION : on passe directement le string
+      where: { id: id },
     });
 
     if (!image) {
       return c.json({ error: "Image non trouvée dans la base de données" }, 404);
     }
 
-    // Étape 2 : Supprimer le fichier physique du dossier "uploads"
     const filePath = join(UPLOAD_DIR, image.fileName);
     if (existsSync(filePath)) {
-      unlinkSync(filePath); 
+      unlinkSync(filePath);
     }
 
-    // Étape 3 : Supprimer l'entrée dans la base de données Prisma
     await prisma.image.delete({
-      where: { id: id }, // 👈 CORRECTION : on passe directement le string
+      where: { id: id },
     });
 
     return c.json({ message: "Image supprimée avec succès" }, 200);
@@ -147,3 +149,18 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
     return c.json({ error: "Une erreur est survenue lors de la suppression" }, 500);
   }
 });
+
+// ------------------------------------------------------------------
+// 4. DÉMARRAGE DU SERVEUR (OBLIGATOIRE)
+// ------------------------------------------------------------------
+const port = Number(process.env.PORT) || 3000;
+
+serve(
+  {
+    fetch: app.fetch,
+    port,
+  },
+  (info) => {
+    console.log(`Serveur démarré sur le port ${info.port} 🚀`);
+  }
+);
