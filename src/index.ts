@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors"; // 👈 1. Importation du middleware CORS
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { jwt, sign } from "hono/jwt";
@@ -8,6 +9,14 @@ import { join } from "path";
 import bcrypt from "bcryptjs"; // Import de bcryptjs
 
 const app = new Hono();
+
+// 👈 2. Activation de CORS pour autoriser les requêtes de votre frontend
+app.use("/*", cors({
+  origin: "*", // Autorise toutes les origines (ou mettez l'URL exacte de votre front si besoin)
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Authorization"],
+}));
+
 // Message de bienvenue sur la racine
 app.get("/", (c) => {
   return c.text("Bienvenue sur l'API de gestion d'images de Saint Charles ! 🚀");
@@ -29,7 +38,6 @@ if (!existsSync(UPLOAD_DIR)) {
 }
 
 // Servir les images enregistrées en accès public
-// Remplacez la ligne app.use("/uploads/*", ...) par ceci :
 app.use("/uploads/*", serveStatic({
   root: "./",
   rewriteRequestPath: (path) => path
