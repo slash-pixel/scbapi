@@ -1,43 +1,35 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors"; // 👈 1. Importation du middleware CORS
+import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { jwt, sign } from "hono/jwt";
 import { PrismaClient } from "@prisma/client";
-import { writeFileSync, mkdirSync, existsSync } from "fs";
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs"; // 👈 Ajout de unlinkSync
 import { join } from "path";
-import bcrypt from "bcryptjs"; // Import de bcryptjs
+import bcrypt from "bcryptjs";
 
 const app = new Hono();
 
-// 👈 2. Activation de CORS pour autoriser les requêtes de votre frontend
 app.use("/*", cors({
-  origin: "*", // Autorise toutes les origines (ou mettez l'URL exacte de votre front si besoin)
+  origin: "*", 
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Authorization"],
 }));
 
-// Message de bienvenue sur la racine
 app.get("/", (c) => {
   return c.text("Bienvenue sur l'API de gestion d'images de Saint Charles ! 🚀");
 });
-const prisma = new PrismaClient();
 
+const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_me";
 const UPLOAD_DIR = "./uploads";
 
-// ------------------------------------------------------------------
-// 🔑 CONFIGURATION DU MOT DE PASSE (BCRYPT)
-// ------------------------------------------------------------------
-// Si aucun hash n'est fourni dans le .env, on hache "saintcharles" par défaut
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
 
-// Créer le dossier d'uploads s'il n'existe pas
 if (!existsSync(UPLOAD_DIR)) {
   mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// Servir les images enregistrées en accès public
 app.use("/uploads/*", serveStatic({
   root: "./",
   rewriteRequestPath: (path) => path
@@ -53,14 +45,12 @@ app.post("/api/auth/login", async (c) => {
     return c.json({ error: "Le mot de passe est obligatoire" }, 400);
   }
 
-  // 🔒 Bcrypt compare le mot de passe envoyé ("saintcharles") avec le hash en mémoire
   const isPasswordValid = await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
 
   if (!isPasswordValid) {
     return c.json({ error: "Mot de passe incorrect" }, 401);
   }
 
-  // Génération du token JWT valide pendant 24 heures
   const token = await sign(
     { role: "admin", exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 },
     JWT_SECRET,
@@ -73,7 +63,6 @@ app.post("/api/auth/login", async (c) => {
   });
 });
 
-// Middleware JWT sécurisé pour les routes protégées
 const authMiddleware = jwt({
   secret: JWT_SECRET,
   alg: "HS256",
@@ -102,19 +91,16 @@ app.post("/api/images", authMiddleware, async (c) => {
     return c.json({ error: "Le titre et le fichier image sont requis" }, 400);
   }
 
-  // Générer un nom de fichier unique
   const extension = file.name.split(".").pop();
   const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${extension}`;
   const filePath = join(UPLOAD_DIR, uniqueName);
 
-  // Sauvegarder le fichier physiquement sur le serveur
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   writeFileSync(filePath, buffer);
 
   const imageUrl = `/uploads/${uniqueName}`;
 
-  // Enregistrer les métadonnées de l'image dans la base de données SQLite
   const savedImage = await prisma.image.create({
     data: {
       title,
@@ -126,9 +112,38 @@ app.post("/api/images", authMiddleware, async (c) => {
   return c.json({ message: "Image téléversée avec succès", image: savedImage }, 201);
 });
 
-// Démarrage du serveur Hono (Port dynamique pour Render / Local)
-const port = Number(process.env.PORT) || 3000;
+// ------------------------------------------------------------------
+// 👇 3. SUPPRESSION D'IMAGE (NOUVELLE ROUTE)
+// ------------------------------------------------------------------// ------------------------------------------------------------------
+// 3. SUPPRESSION D'IMAGE (NOUVELLE ROUTE)
+// ------------------------------------------------------------------
+app.delete("/api/images/:id", authMiddleware, async (c) => {
+  const id = c.req.param("id"); // 'id' est un string
 
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`Serveur démarré sur le port ${info.port}`);
+  try {
+    // Étape 1 : Vérifier si l'image existe dans la base de données
+    const image = await prisma.image.findUnique({
+      where: { id: id }, // 👈 CORRECTION : on passe directement le string
+    });
+
+    if (!image) {
+      return c.json({ error: "Image non trouvée dans la base de données" }, 404);
+    }
+
+    // Étape 2 : Supprimer le fichier physique du dossier "uploads"
+    const filePath = join(UPLOAD_DIR, image.fileName);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath); 
+    }
+
+    // Étape 3 : Supprimer l'entrée dans la base de données Prisma
+    await prisma.image.delete({
+      where: { id: id }, // 👈 CORRECTION : on passe directement le string
+    });
+
+    return c.json({ message: "Image supprimée avec succès" }, 200);
+  } catch (error) {
+    console.error("Erreur lors de la suppression de l'image :", error);
+    return c.json({ error: "Une erreur est survenue lors de la suppression" }, 500);
+  }
 });
