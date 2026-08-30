@@ -90,7 +90,7 @@ app.get("/api/images", async (c) => {
 
 // Téléverser une image vers Cloudinary (Protégé)
 app.post("/api/images", authMiddleware, async (c) => {
-  const body = await c.req.parseBody();
+  const body = await c.parseBody();
   const title = body["title"] as string;
   const file = body["image"] as File;
 
@@ -110,8 +110,8 @@ app.post("/api/images", authMiddleware, async (c) => {
     const savedImage = await prisma.image.create({
       data: {
         title,
-        fileName: cloudinaryResult.public_id, // On garde l'ID public pour pouvoir supprimer l'image plus tard
-        url: cloudinaryResult.secure_url,     // Le lien direct vers l'image hébergée
+        fileName: cloudinaryResult.public_id, // Identifiant unique Cloudinary
+        url: cloudinaryResult.secure_url,     // Lien HTTPS direct vers Cloudinary
       },
     });
 
@@ -123,7 +123,7 @@ app.post("/api/images", authMiddleware, async (c) => {
 });
 
 // ------------------------------------------------------------------
-// 3. SUPPRESSION D'IMAGE
+// 3. SUPPRESSION D'IMAGE (SÉCURISÉE & SANS BLOCAGE)
 // ------------------------------------------------------------------
 app.delete("/api/images/:id", authMiddleware, async (c) => {
   const id = c.req.param("id");
@@ -137,12 +137,16 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
       return c.json({ error: "Image non trouvée" }, 404);
     }
 
-    // 1. Supprimer l'image des serveurs de Cloudinary via son public_id
+    // 1. Essayer de supprimer sur Cloudinary si un identifiant existe
     if (image.fileName) {
-      await cloudinary.uploader.destroy(image.fileName);
+      try {
+        await cloudinary.uploader.destroy(image.fileName);
+      } catch (cloudErr) {
+        console.warn(`[Cloudinary] Impossible de détruire ${image.fileName}, poursuite de la suppression en BDD.`, cloudErr);
+      }
     }
 
-    // 2. Supprimer l'entrée dans la base de données Prisma
+    // 2. Supprimer la ligne dans la base de données Neon via Prisma
     await prisma.image.delete({
       where: { id: id },
     });
@@ -150,7 +154,7 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
     return c.json({ message: "Image supprimée avec succès" }, 200);
   } catch (error) {
     console.error("Erreur lors de la suppression :", error);
-    return c.json({ error: "Une erreur est survenue" }, 500);
+    return c.json({ error: "Une erreur est survenue lors de la suppression" }, 500);
   }
 });
 
