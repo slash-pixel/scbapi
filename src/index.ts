@@ -1,14 +1,26 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
-import { serveStatic } from "@hono/node-server/serve-static";
 import { jwt, sign } from "hono/jwt";
 import { PrismaClient } from "@prisma/client";
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from "fs";
-import { join } from "path";
+import { v2 as cloudinary } from "cloudinary";
 import bcrypt from "bcryptjs";
 
+// ------------------------------------------------------------------
+// CONFIGURATIONS
+// ------------------------------------------------------------------
 const app = new Hono();
+const prisma = new PrismaClient();
+
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_me";
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
+
+// Configuration Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 app.use(
   "/*",
@@ -23,57 +35,46 @@ app.get("/", (c) => {
   return c.text("Bienvenue sur l'API de gestion d'images de Saint Charles ! 🚀");
 });
 
-const prisma = new PrismaClient();
-const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_me";
-const UPLOAD_DIR = "./uploads";
-
-const ADMIN_PASSWORD_HASH =
-  process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
-
-if (!existsSync(UPLOAD_DIR)) {
-  mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-app.use(
-  "/uploads/*",
-  serveStatic({
-    root: "./",
-    rewriteRequestPath: (path) => path,
-  })
-);
-
 // ------------------------------------------------------------------
 // 1. CONNEXION (SÉCURISÉE AVEC BCRYPT)
 // ------------------------------------------------------------------
 app.post("/api/auth/login", async (c) => {
   const { password } = await c.req.json();
 
-  if (!password) {
-    return c.json({ error: "Le mot de passe est obligatoire" }, 400);
-  }
+  if (!password) return c.json({ error: "Le mot de passe est obligatoire" }, 400);
 
   const isPasswordValid = await bcrypt.compare(password, ADMIN_PASSWORD_HASH);
 
-  if (!isPasswordValid) {
-    return c.json({ error: "Mot de passe incorrect" }, 401);
-  }
+  if (!isPasswordValid) return c.json({ error: "Mot de passe incorrect" }, 401);
 
+  // Le token expire dans 24h
   const token = await sign(
     { role: "admin", exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 },
     JWT_SECRET,
     "HS256"
   );
 
-  return c.json({
-    message: "Connexion réussie",
-    token,
-  });
+  return c.json({ message: "Connexion réussie", token });
 });
 
 const authMiddleware = jwt({
   secret: JWT_SECRET,
   alg: "HS256",
 });
+
+// Fonction utilitaire pour uploader un buffer vers Cloudinary via un stream
+const uploadToCloudinary = (buffer: Buffer): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: "saint-charles" }, // Crée un dossier propre dans ton Cloudinary
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+};
 
 // ------------------------------------------------------------------
 // 2. GESTION DES IMAGES
@@ -84,11 +85,10 @@ app.get("/api/images", async (c) => {
   const images = await prisma.image.findMany({
     orderBy: { createdAt: "desc" },
   });
-
   return c.json(images);
 });
 
-// Téléverser une image (Protégé par le token JWT)
+// Téléverser une image vers Cloudinary (Protégé)
 app.post("/api/images", authMiddleware, async (c) => {
   const body = await c.req.parseBody();
   const title = body["title"] as string;
@@ -98,25 +98,28 @@ app.post("/api/images", authMiddleware, async (c) => {
     return c.json({ error: "Le titre et le fichier image sont requis" }, 400);
   }
 
-  const extension = file.name.split(".").pop();
-  const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${extension}`;
-  const filePath = join(UPLOAD_DIR, uniqueName);
+  try {
+    // 1. Convertir le fichier en Buffer
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
 
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  writeFileSync(filePath, buffer);
+    // 2. Envoyer directement à Cloudinary
+    const cloudinaryResult = await uploadToCloudinary(buffer);
 
-  const imageUrl = `/uploads/${uniqueName}`;
+    // 3. Sauvegarder dans Neon PostgreSQL via Prisma
+    const savedImage = await prisma.image.create({
+      data: {
+        title,
+        fileName: cloudinaryResult.public_id, // On garde l'ID public pour pouvoir supprimer l'image plus tard
+        url: cloudinaryResult.secure_url,     // Le lien direct vers l'image hébergée
+      },
+    });
 
-  const savedImage = await prisma.image.create({
-    data: {
-      title,
-      fileName: uniqueName,
-      url: imageUrl,
-    },
-  });
-
-  return c.json({ message: "Image téléversée avec succès", image: savedImage }, 201);
+    return c.json({ message: "Image téléversée avec succès", image: savedImage }, 201);
+  } catch (error) {
+    console.error("Erreur d'upload :", error);
+    return c.json({ error: "Erreur lors de l'envoi de l'image" }, 500);
+  }
 });
 
 // ------------------------------------------------------------------
@@ -131,35 +134,33 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
     });
 
     if (!image) {
-      return c.json({ error: "Image non trouvée dans la base de données" }, 404);
+      return c.json({ error: "Image non trouvée" }, 404);
     }
 
-    const filePath = join(UPLOAD_DIR, image.fileName);
-    if (existsSync(filePath)) {
-      unlinkSync(filePath);
+    // 1. Supprimer l'image des serveurs de Cloudinary via son public_id
+    if (image.fileName) {
+      await cloudinary.uploader.destroy(image.fileName);
     }
 
+    // 2. Supprimer l'entrée dans la base de données Prisma
     await prisma.image.delete({
       where: { id: id },
     });
 
     return c.json({ message: "Image supprimée avec succès" }, 200);
   } catch (error) {
-    console.error("Erreur lors de la suppression de l'image :", error);
-    return c.json({ error: "Une erreur est survenue lors de la suppression" }, 500);
+    console.error("Erreur lors de la suppression :", error);
+    return c.json({ error: "Une erreur est survenue" }, 500);
   }
 });
 
 // ------------------------------------------------------------------
-// 4. DÉMARRAGE DU SERVEUR (OBLIGATOIRE)
+// 4. DÉMARRAGE DU SERVEUR
 // ------------------------------------------------------------------
 const port = Number(process.env.PORT) || 3000;
 
 serve(
-  {
-    fetch: app.fetch,
-    port,
-  },
+  { fetch: app.fetch, port },
   (info) => {
     console.log(`Serveur démarré sur le port ${info.port} 🚀`);
   }
