@@ -90,7 +90,7 @@ app.get("/api/images", async (c) => {
 
 // Téléverser une image vers Cloudinary (Protégé)
 app.post("/api/images", authMiddleware, async (c) => {
-  const body = await c.parseBody();
+  const body = await c.req.parseBody();
   const title = body["title"] as string;
   const file = body["image"] as File;
 
