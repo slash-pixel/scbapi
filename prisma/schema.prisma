@@ -3,13 +3,14 @@ datasource db {
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
+
 generator client {
   provider = "prisma-client-js"
 }
 
 model Image {
   id        String   @id @default(cuid())
-  title     String
+  title     String?  // Rendus optionnel avec le '?'
   fileName  String
   url       String
   createdAt DateTime @default(now())

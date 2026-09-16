@@ -66,7 +66,7 @@ const authMiddleware = jwt({
 const uploadToCloudinary = (buffer: Buffer): Promise<any> => {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { folder: "saint-charles" }, // Crée un dossier propre dans ton Cloudinary
+      { folder: "saint-charles" },
       (error, result) => {
         if (error) reject(error);
         else resolve(result);
@@ -91,11 +91,12 @@ app.get("/api/images", async (c) => {
 // Téléverser une image vers Cloudinary (Protégé)
 app.post("/api/images", authMiddleware, async (c) => {
   const body = await c.req.parseBody();
-  const title = body["title"] as string;
   const file = body["image"] as File;
+  const title = (body["title"] as string) || null; // Titre optionnel
 
-  if (!title || !file) {
-    return c.json({ error: "Le titre et le fichier image sont requis" }, 400);
+  // Seule l'image est obligatoire désormais
+  if (!file) {
+    return c.json({ error: "Le fichier image est requis" }, 400);
   }
 
   try {
@@ -109,9 +110,9 @@ app.post("/api/images", authMiddleware, async (c) => {
     // 3. Sauvegarder dans Neon PostgreSQL via Prisma
     const savedImage = await prisma.image.create({
       data: {
-        title,
-        fileName: cloudinaryResult.public_id, // Identifiant unique Cloudinary
-        url: cloudinaryResult.secure_url,     // Lien HTTPS direct vers Cloudinary
+        title: title || file.name, // Utilise le nom du fichier si aucun titre n'est fourni
+        fileName: cloudinaryResult.public_id,
+        url: cloudinaryResult.secure_url,
       },
     });
 
@@ -137,7 +138,6 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
       return c.json({ error: "Image non trouvée" }, 404);
     }
 
-    // 1. Essayer de supprimer sur Cloudinary si un identifiant existe
     if (image.fileName) {
       try {
         await cloudinary.uploader.destroy(image.fileName);
@@ -146,7 +146,6 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
       }
     }
 
-    // 2. Supprimer la ligne dans la base de données Neon via Prisma
     await prisma.image.delete({
       where: { id: id },
     });
