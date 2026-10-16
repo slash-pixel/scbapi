@@ -12,8 +12,16 @@ import bcrypt from "bcryptjs";
 const app = new Hono();
 const prisma = new PrismaClient();
 
-const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key_change_me";
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || bcrypt.hashSync("saintcharles", 10);
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("La variable d'environnement JWT_SECRET est obligatoire dans le fichier .env");
+}
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+if (!ADMIN_PASSWORD) {
+  throw new Error("La variable d'environnement ADMIN_PASSWORD est obligatoire dans le fichier .env");
+}
+const ADMIN_PASSWORD_HASH = bcrypt.hashSync(ADMIN_PASSWORD, 10);
 
 // Configuration Cloudinary
 cloudinary.config({
@@ -26,13 +34,13 @@ app.use(
   "/*",
   cors({
     origin: "*",
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   })
 );
 
 app.get("/", (c) => {
-  return c.text("Bienvenue sur l'API de gestion d'images de Saint Charles ! 🚀");
+  return c.text("Bienvenue sur l'API de Saint Charles ! 🚀");
 });
 
 // ------------------------------------------------------------------
@@ -92,25 +100,21 @@ app.get("/api/images", async (c) => {
 app.post("/api/images", authMiddleware, async (c) => {
   const body = await c.req.parseBody();
   const file = body["image"] as File;
-  const title = (body["title"] as string) || null; // Titre optionnel
+  const title = (body["title"] as string) || null;
 
-  // Seule l'image est obligatoire désormais
   if (!file) {
     return c.json({ error: "Le fichier image est requis" }, 400);
   }
 
   try {
-    // 1. Convertir le fichier en Buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    // 2. Envoyer directement à Cloudinary
     const cloudinaryResult = await uploadToCloudinary(buffer);
 
-    // 3. Sauvegarder dans Neon PostgreSQL via Prisma
     const savedImage = await prisma.image.create({
       data: {
-        title: title || file.name, // Utilise le nom du fichier si aucun titre n'est fourni
+        title: title || file.name,
         fileName: cloudinaryResult.public_id,
         url: cloudinaryResult.secure_url,
       },
@@ -123,9 +127,7 @@ app.post("/api/images", authMiddleware, async (c) => {
   }
 });
 
-// ------------------------------------------------------------------
-// 3. SUPPRESSION D'IMAGE (SÉCURISÉE & SANS BLOCAGE)
-// ------------------------------------------------------------------
+// Supprimer une image (Protégé)
 app.delete("/api/images/:id", authMiddleware, async (c) => {
   const id = c.req.param("id");
 
@@ -142,7 +144,7 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
       try {
         await cloudinary.uploader.destroy(image.fileName);
       } catch (cloudErr) {
-        console.warn(`[Cloudinary] Impossible de détruire ${image.fileName}, poursuite de la suppression en BDD.`, cloudErr);
+        console.warn(`[Cloudinary] Impossible de détruire ${image.fileName}.`, cloudErr);
       }
     }
 
@@ -154,6 +156,137 @@ app.delete("/api/images/:id", authMiddleware, async (c) => {
   } catch (error) {
     console.error("Erreur lors de la suppression :", error);
     return c.json({ error: "Une erreur est survenue lors de la suppression" }, 500);
+  }
+});
+
+// ------------------------------------------------------------------
+// 3. GESTION DES COMMENTAIRES (AVEC VALIDATION ET MODÉRATION)
+// ------------------------------------------------------------------
+
+// A. Récupérer uniquement les commentaires approuvés (Public)
+app.get("/api/comments", async (c) => {
+  try {
+    const comments = await prisma.comment.findMany({
+      where: { status: "approved" },
+      orderBy: { createdAt: "desc" },
+    });
+    return c.json(comments);
+  } catch (error) {
+    return c.json({ error: "Erreur lors de la récupération des commentaires." }, 500);
+  }
+});
+
+// B. Soumettre un commentaire (Public - statut par défaut "pending")
+app.post("/api/comments", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { author, content } = body;
+
+    // Validation stricte : Auteur obligatoire et non vide
+    if (!author || typeof author !== "string" || author.trim() === "") {
+      return c.json({ error: "Le nom de l'auteur est obligatoire et ne peut pas être vide." }, 400);
+    }
+
+    // Validation stricte : Contenu obligatoire et non vide
+    if (!content || typeof content !== "string" || content.trim() === "") {
+      return c.json({ error: "Le commentaire est obligatoire et ne peut pas être vide." }, 400);
+    }
+
+    // Validation stricte : Maximum 500 caractères
+    if (content.length > 500) {
+      return c.json({ error: "Le commentaire ne doit pas dépasser 500 caractères." }, 400);
+    }
+
+    const newComment = await prisma.comment.create({
+      data: {
+        author: author.trim(),
+        content: content.trim(),
+        status: "pending", // En attente de validation par l'admin
+      },
+    });
+
+    return c.json({
+      message: "Commentaire soumis avec succès. Il est en attente de modération.",
+      comment: newComment,
+    }, 201);
+
+  } catch (error) {
+    return c.json({ error: "Erreur serveur lors de l'enregistrement du commentaire." }, 500);
+  }
+});
+
+// C. Récupérer TOUS les commentaires (y compris les "pending") - (Protégé Admin)
+app.get("/api/admin/comments", authMiddleware, async (c) => {
+  try {
+    const comments = await prisma.comment.findMany({
+      orderBy: { createdAt: "desc" },
+    });
+    return c.json(comments);
+  } catch (error) {
+    return c.json({ error: "Erreur lors de la récupération des commentaires." }, 500);
+  }
+});
+
+// D. Modifier un commentaire, son nom ou son statut (Approuver/Rejeter) - (Protégé Admin)
+app.patch("/api/admin/comments/:id", authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+    const body = await c.req.json();
+    const { author, content, status } = body;
+
+    const updateData: any = {};
+
+    if (author !== undefined) {
+      if (typeof author !== "string" || author.trim() === "") {
+        return c.json({ error: "Le nom ne peut pas être vide." }, 400);
+      }
+      updateData.author = author.trim();
+    }
+
+    if (content !== undefined) {
+      if (typeof content !== "string" || content.trim() === "") {
+        return c.json({ error: "Le commentaire ne peut pas être vide." }, 400);
+      }
+      if (content.length > 500) {
+        return c.json({ error: "Le commentaire ne doit pas dépasser 500 caractères." }, 400);
+      }
+      updateData.content = content.trim();
+    }
+
+    if (status !== undefined) {
+      if (!["pending", "approved"].includes(status)) {
+        return c.json({ error: "Statut invalide. Utilisez 'pending' ou 'approved'." }, 400);
+      }
+      updateData.status = status;
+    }
+
+    const updatedComment = await prisma.comment.update({
+      where: { id },
+      data: updateData,
+    });
+
+    return c.json({
+      message: "Commentaire mis à jour avec succès.",
+      comment: updatedComment,
+    });
+
+  } catch (error) {
+    return c.json({ error: "Commentaire introuvable ou erreur de mise à jour." }, 404);
+  }
+});
+
+// E. Supprimer un commentaire - (Protégé Admin)
+app.delete("/api/admin/comments/:id", authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+
+    await prisma.comment.delete({
+      where: { id },
+    });
+
+    return c.json({ message: "Commentaire supprimé avec succès." });
+  } catch (error) {
+    return c.json({ error: "Commentaire introuvable ou erreur lors de la suppression." }, 404);
   }
 });
 
