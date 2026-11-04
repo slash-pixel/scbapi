@@ -291,7 +291,150 @@ app.delete("/api/admin/comments/:id", authMiddleware, async (c) => {
 });
 
 // ------------------------------------------------------------------
-// 4. DÉMARRAGE DU SERVEUR
+// 4. GESTION DES ÉVÉNEMENTS (AGENDA + TICKER)
+// ------------------------------------------------------------------
+const DISPLAY_MODES = ["AGENDA", "TICKER", "BOTH"];
+
+const startOfToday = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+// Valide et nettoie le corps d'une requête événement
+const parseEventBody = (body: any, partial = false) => {
+  const data: any = {};
+
+  if (!partial || body.title !== undefined) {
+    if (typeof body.title !== "string" || body.title.trim() === "") {
+      return { error: "Le titre est obligatoire et ne peut pas être vide." };
+    }
+    if (body.title.length > 150) {
+      return { error: "Le titre ne doit pas dépasser 150 caractères." };
+    }
+    data.title = body.title.trim();
+  }
+
+  if (body.description !== undefined) {
+    if (body.description !== null && typeof body.description !== "string") {
+      return { error: "Description invalide." };
+    }
+    data.description = body.description?.trim() || null;
+  }
+
+  if (!partial || body.eventDate !== undefined) {
+    const date = new Date(body.eventDate);
+    if (!body.eventDate || isNaN(date.getTime())) {
+      return { error: "La date et l'heure de l'événement sont invalides." };
+    }
+    data.eventDate = date;
+  }
+
+  if (body.displayMode !== undefined) {
+    if (!DISPLAY_MODES.includes(body.displayMode)) {
+      return { error: "Mode d'affichage invalide. Utilisez AGENDA, TICKER ou BOTH." };
+    }
+    data.displayMode = body.displayMode;
+  }
+
+  return { data };
+};
+
+// A. Liste publique : ?mode=agenda|ticker  &  ?upcoming=true
+app.get("/api/events", async (c) => {
+  try {
+    const mode = c.req.query("mode")?.toUpperCase();
+    const where: any = {};
+
+    if (mode === "AGENDA" || mode === "TICKER") {
+      where.displayMode = { in: [mode, "BOTH"] };
+    }
+    if (c.req.query("upcoming") === "true") {
+      where.eventDate = { gte: new Date() };
+    }
+
+    const events = await prisma.event.findMany({
+      where,
+      orderBy: { eventDate: "asc" },
+    });
+    return c.json(events);
+  } catch (error) {
+    return c.json({ error: "Erreur lors de la récupération des événements." }, 500);
+  }
+});
+
+// B. Événements à venir (Public)
+app.get("/api/events/upcoming", async (c) => {
+  try {
+    const events = await prisma.event.findMany({
+      where: { eventDate: { gte: new Date() } },
+      orderBy: { eventDate: "asc" },
+    });
+    return c.json(events);
+  } catch (error) {
+    return c.json({ error: "Erreur lors de la récupération des événements." }, 500);
+  }
+});
+
+// C. Événements du bandeau défilant (Public)
+// On part du début de la journée pour qu'un événement du jour reste visible jusqu'au soir
+app.get("/api/events/ticker", async (c) => {
+  try {
+    const events = await prisma.event.findMany({
+      where: {
+        displayMode: { in: ["TICKER", "BOTH"] },
+        eventDate: { gte: startOfToday() },
+      },
+      orderBy: { eventDate: "asc" },
+      take: 20,
+    });
+    return c.json(events);
+  } catch (error) {
+    return c.json({ error: "Erreur lors de la récupération du bandeau." }, 500);
+  }
+});
+
+// D. Créer un événement (Protégé Admin)
+app.post("/api/events", authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json();
+    const { data, error } = parseEventBody(body);
+    if (error) return c.json({ error }, 400);
+
+    const event = await prisma.event.create({ data });
+    return c.json({ message: "Événement créé avec succès.", event }, 201);
+  } catch (error) {
+    return c.json({ error: "Erreur serveur lors de la création de l'événement." }, 500);
+  }
+});
+
+// E. Modifier un événement (Protégé Admin)
+app.put("/api/events/:id", authMiddleware, async (c) => {
+  try {
+    const id = c.req.param("id");
+    const body = await c.req.json();
+    const { data, error } = parseEventBody(body, true);
+    if (error) return c.json({ error }, 400);
+
+    const event = await prisma.event.update({ where: { id }, data });
+    return c.json({ message: "Événement mis à jour avec succès.", event });
+  } catch (error) {
+    return c.json({ error: "Événement introuvable ou erreur de mise à jour." }, 404);
+  }
+});
+
+// F. Supprimer un événement (Protégé Admin)
+app.delete("/api/events/:id", authMiddleware, async (c) => {
+  try {
+    await prisma.event.delete({ where: { id: c.req.param("id") } });
+    return c.json({ message: "Événement supprimé avec succès." });
+  } catch (error) {
+    return c.json({ error: "Événement introuvable ou erreur lors de la suppression." }, 404);
+  }
+});
+
+// ------------------------------------------------------------------
+// 5. DÉMARRAGE DU SERVEUR
 // ------------------------------------------------------------------
 const port = Number(process.env.PORT) || 3000;
 
